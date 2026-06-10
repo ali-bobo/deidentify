@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# ── Tool output — NEVER commit these ──────────────────────────────────────────
+# Go-identified output and reversal mapping MUST stay local.
+deidentified_output/
+deidentify_mapping/
+
+# ── Sensitive input data — keep ALL private logs out of git ───────────────────
+# Add explicit example_ exceptions to allow sanitised demo files.
+*.log
+*.txt
+*.csv
+*.json
+*.xml
+*.evtx
+*.pcap
+*.pcapng
+*.xlsx
+*.xls
+*.docx
+*.doc
+*.pdf
+!example_*.json
+!example_*.txt
+!example_*.csv
+
+# Common secrets / credential files
+.env
+.env.*
+*.env
+secrets.yaml
+secrets.yml
+*_secrets.*
+credentials.json
+service_account.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
