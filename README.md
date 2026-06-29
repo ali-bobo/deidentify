@@ -8,6 +8,11 @@
 
 ## 打包為 EXE（開發者）
 
+**前提條件**
+
+- 安裝 [Python 3.9 以上](https://www.python.org/downloads/)（建議勾選「Add Python to PATH」）
+- Windows 環境（打包結果只能在 Windows 上執行）
+
 **步驟一：安裝依賴**
 
 PowerShell 無法直接執行裸 `pip`，請用以下格式：
