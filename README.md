@@ -10,7 +10,7 @@
 
 **前提條件**
 
-- 安裝 [Python 3.9 以上](https://www.python.org/downloads/)（建議勾選「Add Python to PATH」）
+- 安裝 [Python 3.14](https://www.python.org/downloads/)（已驗證版本；建議勾選「Add Python to PATH」）
 - Windows 環境（打包結果只能在 Windows 上執行）
 
 **步驟一：安裝依賴**
