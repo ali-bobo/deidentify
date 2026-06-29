@@ -1,37 +1,26 @@
 # Security Policy
 
-## Intended Use
+## 設計原則
 
-This tool is designed for **local, offline use only**. It processes potentially
-sensitive log files on your machine and outputs de-identified copies that are
-safe to share externally. The tool itself makes no network connections during
-processing.
+本工具設計為**本地離線執行**，不連接任何外部服務。日誌檔案的所有處理皆在本機完成。
 
-## What Is Safe to Push / Upload
+## 哪些東西可以上傳 / 分享
 
-| Item | Safe? |
-|------|-------|
-| `deidentify.py`, `setup_and_run.py`, `README.md` | ✅ Source code only |
-| `*_deidentified.*` (output folder) | ✅ After human review |
-| `*_mapping.json` (mapping folder) | ❌ **Never. Contains original values.** |
-| Original log files (`*.log`, `*.csv`, etc.) | ❌ Keep local |
+| 項目 | 安全？ |
+|------|--------|
+| 去識別化輸出（`deidentified_output/`） | ✅ 人工確認後可分享 |
+| 原始碼（`*.py`、`*.spec`、`*.md`） | ✅ 無敏感內容 |
+| `deidentify_mapping/*.json` | ❌ **絕對不行，含原始值** |
+| 原始日誌（`*.log`、`*.csv` 等） | ❌ 保留本地 |
+| `rules.yaml` | ❌ 含使用者自訂關鍵字，保留本地 |
 
-## Reporting a Vulnerability
+## 已知限制
 
-If you discover a security issue in this tool (e.g. a bypass that causes
-sensitive data to appear in de-identified output), please **do not** open a
-public GitHub issue. Instead, open a **private security advisory** via the
-GitHub repository's Security tab, or contact the author directly.
+- 偵測以 Pattern + NLP 為基礎，無法保證 100% 召回率
+- 分享前請人工抽查輸出，確認無殘留敏感資訊
+- 密碼被遮蔽後仍應輪換憑證，遮蔽不等於撤銷
 
-## Known Limitations
+## 回報漏洞
 
-- Detection is pattern-based and heuristic — not guaranteed 100% recall.
-- Always review the audit summary and spot-check output before sharing.
-- Passwords and tokens are redacted but **must also be rotated**; redaction
-  alone does not protect against credential re-use.
-
-## Dependencies Security
-
-Runtime dependencies (`presidio-analyzer`, `presidio-anonymizer`, `spaCy`,
-`click`) are installed from official PyPI on first run. If you operate in a
-controlled environment, pin exact versions and audit them before deployment.
+若發現去識別化有遺漏或繞過的方式，請勿直接開 Issue 公開細節。  
+請透過 GitHub Repository 的 **Security** 頁籤開立私密安全諮詢，或直接聯繫作者。

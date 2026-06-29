@@ -1,152 +1,89 @@
 # Log De-identification Tool
 
-A privacy-protection tool for security analysts that replaces sensitive identifiers in log files with consistent pseudonyms before uploading to external analysis platforms.
+將日誌中的個人資訊（IP、Email、使用者名、中文姓名、MAC Address 等）自動替換為匿名佔位符，產出可安全對外分享的去識別化版本，並保留僅在本地存放的還原對照表。
 
-Designed to be **EDR/platform-agnostic** — works with any structured or unstructured log format. Built-in structured pipeline for EDR threat export CSVs (threat/host/events layout).
-
-Supports: Chinese text (CJK), IPv4/v6/CIDR, domains, emails, OS usernames, employee IDs, company names, Taiwan phone numbers, Taiwan National IDs, credit card numbers, JWT tokens, AWS/GitHub tokens, and generic secrets/passwords — with a local reversible mapping file kept for reference.
+核心引擎使用 [Microsoft Presidio](https://github.com/microsoft/presidio) 的 NLP 識別框架，在本地離線運行，不對外傳送任何資料。
 
 ---
 
-## Requirements
+## 打包為 EXE（開發者）
 
-- Python 3.9 or higher
-- Internet access on first run (to install dependencies from PyPI)
-
-Dependencies installed automatically: `presidio-analyzer`, `presidio-anonymizer`, `spacy`, `click`
-
----
-
-## Quick Start
-
-Place `setup_and_run.py` and `deidentify.py` in the same folder, then:
+需先安裝依賴與 PyInstaller：
 
 ```bash
-# First run — installs dependencies and verifies compatibility
-python setup_and_run.py
-
-# Process a file
-python setup_and_run.py your_file.log
+pip install -r requirements.txt
+pip install pyinstaller
 ```
 
----
-
-## Usage
+接著在專案根目錄執行：
 
 ```bash
-python setup_and_run.py <file> [options]
+python -m PyInstaller deidentify-tool.spec --noconfirm
 ```
 
-Supported formats: `.txt` `.log` `.json` `.csv` (anything else treated as plain text)
+打包完成後，執行檔位於 `dist/deidentify-tool/deidentify-tool.exe`。
 
-EDR-style CSV exports with a `Threat Information` section are automatically detected and processed through a structured parse → dedup → de-identify pipeline.
-
-### Options
-
-| Option | Description |
-|--------|-------------|
-| `--keep-public-ip` | Retain public IPs (useful when analyzing external C2 sources) |
-| `-w KEYWORD` | Manually specify additional terms to redact (repeatable) |
-| `--custom-id-pattern REGEX` | Register an extra regex as a custom ID entity (repeatable) |
-| `--redact-uuid` | Enable UUID redaction (off by default — UUIDs are usually event IDs) |
-| `--no-dedup` | Disable duplicate event filtering for EDR-style CSVs |
-| `--max-mb N` | Output file size limit in MB, default 10 (auto-splits if exceeded) |
-| `--output-dir DIR` | Folder for de-identified output (default: `deidentified_output/`) |
-| `--mapping-dir DIR` | Folder for reversal mapping files (default: `deidentify_mapping/`) |
-| `--yes` | Skip install confirmation prompt (for CI/automation) |
-
-### Examples
-
-```bash
-# Basic
-python setup_and_run.py incident.log
-
-# Keep public IPs for C2 analysis
-python setup_and_run.py incident.log --keep-public-ip
-
-# Redact custom keywords
-python setup_and_run.py incident.log -w "ProjectAlpha" -w "SERVER-LAB01"
-
-# Redact a custom ID format with regex (e.g. internal asset tags like AB123456)
-python setup_and_run.py incident.log --custom-id-pattern "\bAB\d{6}\b"
-
-# Multiple files
-python setup_and_run.py *.csv --redact-uuid
-```
+> **注意事項**
+> - 打包約需 2–5 分鐘，過程中出現 `WARNING` 屬正常現象
+> - 打包環境需與目標平台相同（Windows 打 Windows 版）
+> - `dist/` 與 `build/` 已加入 `.gitignore`，不會進入版本控制
 
 ---
 
-## Output Files
+## 使用方式（EXE）
 
-| File | Purpose | Safe to Upload |
-|------|---------|----------------|
-| `<name>_deidentified.json` | De-identified result | ✅ Yes |
-| `<name>_mapping.json` | Reversal mapping table | ❌ **Never upload** |
+直接執行 `deidentify-tool.exe`，不需安裝 Python 環境。
 
-After processing, an audit summary is printed showing how many unique values were replaced per entity type.
+### 步驟
 
----
+1. **選擇檔案**：點擊「＋ 選擇檔案」或將檔案拖曳至視窗
+   - 支援格式：`.log` `.txt` `.csv` `.json`
+2. **設定保留選項**：勾選不需遮蔽的欄位（時間、公開 IP、網域等）
+3. **點擊「開始去識別化」**
 
-## What Gets Detected
+### 輸出
 
-| Entity | Notes |
-|--------|-------|
-| CJK characters | All Chinese/full-width text |
-| IPv4 | Internal and external; browser version strings excluded |
-| IPv6 | Including `fe80::` link-local addresses |
-| CIDR notation | Both v4 and v6 |
-| Domains | Real TLD anchoring; major public domains (google.com, microsoft.com, etc.) preserved |
-| Email addresses | All redacted |
-| OS usernames | `\Users\NAME\` (Windows), `/Users/NAME/` (macOS), `/home/NAME/` (Linux) |
-| Employee IDs | Pattern: 1 letter + 6–8 digits (e.g. `N1410360`) |
-| Company names | Suffix-anchored: Ltd, Corp, Inc, GmbH, LLC, etc. |
-| Taiwan phone numbers | `09xx` and `+886-9xx` formats with length validation |
-| Taiwan National ID | With checksum validation |
-| Credit card numbers | With Luhn algorithm validation |
-| Passwords / Tokens | Redacted; triggers a **rotation warning** |
-| JWT tokens | Detected by header pattern (`eyJ…`) |
-| AWS/GitHub tokens | `AKIA…`, `ghp_…`, `github_pat_…` patterns |
-| Custom ID patterns | User-supplied via `--custom-id-pattern REGEX` |
-| UUID | Off by default; enable with `--redact-uuid` |
+| 位置 | 說明 |
+|------|------|
+| `deidentified_output/` | 去識別化後的檔案，可對外分享 |
+| `deidentify_mapping/` | 還原對照表，**請勿對外傳送** |
 
-JSON processing: only values are redacted, keys are preserved.  
-CSV processing: header row preserved; sensitive key names in data cells also detected.
+### 自訂黑名單
+
+複製 `rules.yaml.example` 為 `rules.yaml`，填入需要額外遮蔽的關鍵字，或直接在 GUI 的「⚙ 黑名單」中編輯。
 
 ---
 
-## Pre-Upload Checklist
+## 自動偵測的資訊類型
 
-```
-□ Uploading the _deidentified file, not the original
-□ Audit summary replacement counts look reasonable
-□ _mapping.json stays local — not uploaded
-□ If password/token warning appeared → rotate those credentials
-```
-
----
-
-## Limitations
-
-- **Company name detection is suffix-anchored** — names without Ltd/Corp/Inc etc. will not be caught. Use `-w` to add them manually.
-- **Custom internal ID formats** (asset tags, site codes, ticket numbers) need explicit `--custom-id-pattern` to be covered.
-- **Pure numbers are not redacted** — timestamps and sequence numbers are preserved intentionally.
-- **Automatic detection is not 100%** — always review the audit summary and spot-check known sensitive values before uploading.
-
----
-
-## Customizing Detection Rules
-
-Open `deidentify.py` — the detection rules are defined at the top of the file:
-
-- Company name suffixes → `CORP_SUFFIX`
-- Employee ID format → `EMPID_PATTERN`
-- Public domain whitelist → `PUBLIC_DOMAIN_WHITELIST`
-- Hostname/device field names in CSVs → `NEXT_CELL_REDACT_KEYS`
-
-For one-off patterns you'd rather not hardcode, use `--custom-id-pattern` at runtime.
+| 類型 | 說明 |
+|------|------|
+| 中文姓名 / CJK | 中文字元序列 |
+| Email | 電子郵件地址 |
+| IP 位址 | IPv4 / IPv6，可選擇保留公開 IP |
+| MAC Address | `AA:BB:CC` 與 `AA-BB-CC` 格式 |
+| 網域 | 可選擇保留（IOC 分析用） |
+| 日期時間 | 可選擇保留（攻擊時間線分析用） |
+| UUID | 可選擇保留（行為路徑關聯用） |
+| 加密錢包地址 | BTC/ETH 等，可選擇保留 |
+| 台灣身分證字號 | 格式驗證 |
+| 信用卡號 | Luhn 演算法驗證 |
+| 員工編號 | 格式 A-NNNNNN |
+| 命令列憑證 | `--password`、`/credential:`、`net user` 等格式 |
+| 機密 JSON 欄位 | `token`、`api_key` 等鍵值對 |
 
 ---
 
-## License
+## 安全說明
 
-MIT
+- **完全離線**：不連接任何外部服務
+- **對照表保密**：`deidentify_mapping/` 含有原始值，絕對不能上傳
+- **密碼需輪換**：遮蔽密碼後仍應輪換憑證，遮蔽不等同撤銷
+
+---
+
+## 授權
+
+本專案以 [MIT License](LICENSE) 發布。
+
+核心 NLP 識別能力來自 [Microsoft Presidio](https://github.com/microsoft/presidio)（MIT License，© Microsoft Corporation）。詳細第三方授權請見 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。

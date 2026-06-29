@@ -34,15 +34,24 @@ import ipaddress
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 # ---- Windows 主控台輸出強制 UTF-8 ----
-if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+# sys.stdout/stderr 在 PyInstaller --windowed 模式下為 None，需先檢查
+if (sys.stdout is not None and hasattr(sys.stdout, "encoding") and
+        sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8")):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if (sys.stderr is not None and hasattr(sys.stderr, "encoding") and
+        sys.stderr.encoding and sys.stderr.encoding.lower() not in ("utf-8", "utf8")):
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from presidio_analyzer import (
     AnalyzerEngine, PatternRecognizer, Pattern, RecognizerRegistry
 )
-from presidio_analyzer.nlp_engine import SpacyNlpEngine
+from presidio_analyzer.nlp_engine import NlpEngine, NlpArtifacts
 from presidio_anonymizer import AnonymizerEngine, OperatorConfig
 from presidio_anonymizer.operators import Operator, OperatorType
 
@@ -115,8 +124,8 @@ CORP_SUFFIX = (
     r"Ltd\.?|LTD\.?|Limited|"
     r"Co\.,?\s*Ltd\.?|CO\.,?\s*LTD\.?|"
     r"Co\.|CO\.|"
-    r"Corp\.?|CORP\.?|Corporation|"
-    r"Inc\.?|INC\.?|Incorporated|"
+    r"Corporation|Corp\.?|CORP\.?|"   # Corporation 必須排在 Corp 前面，避免短式先匹配
+    r"Incorporated|Inc\.?|INC\.?|"    # 同上
     r"LLC|L\.L\.C\.|LLP|"
     r"GmbH|PLC|plc"
     r")"
@@ -131,6 +140,13 @@ ORG_PATTERN = Pattern(
 UUID_PATTERN = Pattern(
     "uuid",
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
+    0.8,
+)
+
+# MAC address（AA:BB:CC:DD:EE:FF 或 AA-BB-CC-DD-EE-FF）
+MAC_PATTERN = Pattern(
+    "mac_address",
+    r"\b(?:[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}|[0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){5})\b",
     0.8,
 )
 
@@ -214,6 +230,52 @@ ORG_CONTEXT = ["account", "name", "company", "organization", "customer",
 
 
 # ============================================================================
+# 規則檔讀取
+# ============================================================================
+
+def load_rules(path) -> Dict[str, List]:
+    """讀取 YAML 規則檔，回傳 {"block": [...], "block_patterns": [...]}。
+
+    block         — 強制遮蔽的字串關鍵字（等同 -w）
+    block_patterns — 強制遮蔽的 regex 字串（需為合法正規表達式）
+
+    錯誤處理：
+      FileNotFoundError — 檔案不存在
+      ValueError        — 格式錯誤 / block 或 block_patterns 不是 list / 無效 regex
+    """
+    if yaml is None:
+        raise ImportError("請先安裝 PyYAML：pip install pyyaml")
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"找不到規則檔：{path}")
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    if raw is None:
+        return {"block": [], "block_patterns": []}
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"rules.yaml 格式錯誤：根層級必須是 YAML mapping（dict），實際是 {type(raw).__name__}")
+
+    block = raw.get("block") or []
+    block_patterns = raw.get("block_patterns") or []
+
+    if not isinstance(block, list):
+        raise ValueError(f"rules.yaml 格式錯誤：block 必須是 list，實際是 {type(block).__name__}")
+    if not isinstance(block_patterns, list):
+        raise ValueError(f"rules.yaml 格式錯誤：block_patterns 必須是 list，實際是 {type(block_patterns).__name__}")
+
+    for pat in block_patterns:
+        try:
+            re.compile(pat)
+        except re.error as exc:
+            raise ValueError(f"無效的 regex 於 block_patterns：{pat!r} — {exc}") from exc
+
+    return {"block": [str(k) for k in block], "block_patterns": [str(p) for p in block_patterns]}
+
+
+# ============================================================================
 # Mapping / 遮蔽 helper
 # ============================================================================
 
@@ -274,6 +336,64 @@ def redact_secret_value(value: Any, key: str,
         "authorization", "auth_token"
     } else "SECRET_VALUE"
     return map_value(entity_mapping, entity_type, value)
+
+
+# 命令列憑證敏感旗標（case-insensitive）
+_CMDLINE_FLAG_KEYWORDS = (
+    "password", "passwd", "pwd", "credential", "cred",
+    "secret", "apikey", "api-key", "api_key", "token", "key", "pass",
+)
+_CMDLINE_FLAG_RE = re.compile(
+    r'(?i)'
+    # --flag value 或 --flag=value 或 -flag value
+    r'(?P<dash>-{1,2}(?:' + '|'.join(_CMDLINE_FLAG_KEYWORDS) + r')'
+    r'(?P<eq>=)?)(?P<sp>\s+)?(?P<val>\S+)'
+    r'|'
+    # /flag:value  (Windows 風格)
+    r'(?P<wflag>/(?:' + '|'.join(_CMDLINE_FLAG_KEYWORDS) + r'):)(?P<wval>\S+)'
+    r'|'
+    # net user USERNAME PASSWORD
+    r'(?P<net>net\s+user\s+\S+\s+)(?P<nval>\S+)'
+)
+
+
+def redact_cmdline_secrets(text: str, entity_mapping: Dict[str, Dict[str, str]],
+                           secret_hit_flag: List[bool]) -> str:
+    """偵測並遮蔽命令列參數中的憑證值，保留旗標名稱本身。"""
+
+    def _should_skip(val: str) -> bool:
+        return val.isdigit() and len(val) < 4
+
+    def _replace(match: re.Match) -> str:
+        if match.group("dash") is not None:
+            val = match.group("val")
+            if _should_skip(val):
+                return match.group(0)
+            secret_hit_flag.append(True)
+            placeholder = map_value(entity_mapping, "CMDLINE_SECRET", val)
+            eq = match.group("eq") or ""
+            sp = match.group("sp") or ""
+            return f"{match.group('dash')}{eq}{sp}{placeholder}"
+
+        if match.group("wflag") is not None:
+            val = match.group("wval")
+            if _should_skip(val):
+                return match.group(0)
+            secret_hit_flag.append(True)
+            placeholder = map_value(entity_mapping, "CMDLINE_SECRET", val)
+            return f"{match.group('wflag')}{placeholder}"
+
+        if match.group("net") is not None:
+            val = match.group("nval")
+            if _should_skip(val):
+                return match.group(0)
+            secret_hit_flag.append(True)
+            placeholder = map_value(entity_mapping, "CMDLINE_SECRET", val)
+            return f"{match.group('net')}{placeholder}"
+
+        return match.group(0)
+
+    return _CMDLINE_FLAG_RE.sub(_replace, text)
 
 
 def redact_inline_secrets(text: str, entity_mapping: Dict[str, Dict[str, str]],
@@ -354,13 +474,24 @@ def redact_ip_literals(text: str, entity_mapping: Dict[str, Dict[str, str]],
 
 
 def redact_keywords(text: str, keywords: List[str],
-                    entity_mapping: Dict[str, Dict[str, str]]) -> str:
-    """用戶自訂關鍵字遮蔽（直接子字串，case-insensitive）。"""
+                    entity_mapping: Dict[str, Dict[str, str]],
+                    block_patterns: List[str] = None) -> str:
+    """用戶自訂關鍵字遮蔽（直接子字串，case-insensitive）。
+
+    block_patterns: 額外的 regex 列表，匹配到的子字串也遮蔽，
+                    與 keywords 共用同一個 KEYWORD bucket。
+    """
     for kw in keywords:
         if not kw:
             continue
         replacement = map_value(entity_mapping, "KEYWORD", kw.lower())
         text = re.sub(re.escape(kw), replacement, text, flags=re.IGNORECASE)
+
+    for pat in (block_patterns or []):
+        def _replace(m):
+            return map_value(entity_mapping, "KEYWORD", m.group(0))
+        text = re.sub(pat, _replace, text)
+
     return text
 
 
@@ -433,8 +564,20 @@ def try_decode_powershell(cmdline: str) -> Optional[str]:
 URL_RE     = re.compile(r"https?://[^\s\"'<>|)]+")
 IPV4_RE    = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
 SHA1_RE    = re.compile(r"\b[0-9a-fA-F]{40}\b")
+SHA256_RE  = re.compile(r"\b[0-9a-fA-F]{64}\b")
 WINPATH_RE = re.compile(r"[A-Za-z]:\\\\?(?:[^\\/:*?\"<>|\r\n]+\\\\?)*[^\\/:*?\"<>|\r\n]*")
 DOMAIN_RE  = re.compile(r"\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b")
+
+
+def _add_hash_ioc(val: str, iocs: Dict[str, set]):
+    """按 hash 長度分類放入正確的 iocs bucket（SHA1=40、SHA256=64）。"""
+    if not val:
+        return
+    h = val.strip().lower()
+    if len(h) == 64 and h != "0" * 64:
+        iocs["sha256"].add(h)
+    elif len(h) == 40 and h != "0" * 40:
+        iocs["sha1"].add(h)
 
 
 def extract_iocs_from_text(text: str, iocs: Dict[str, set]):
@@ -450,8 +593,11 @@ def extract_iocs_from_text(text: str, iocs: Dict[str, set]):
         # 排除版本號形狀
         if ip.split(".")[1:] != ["0", "0", "0"]:
             iocs["ipv4"].add(ip)
+    for h in SHA256_RE.findall(text):
+        if h != "0" * 64:
+            iocs["sha256"].add(h.lower())
     for h in SHA1_RE.findall(text):
-        if h != "0" * 40:  # 排除空 hash
+        if h != "0" * 40:
             iocs["sha1"].add(h.lower())
 
 
@@ -515,7 +661,7 @@ def parse_edr_csv(text: str) -> Dict[str, Any]:
         "threat": {},
         "host": {},
         "events": [],
-        "iocs": {"urls": set(), "ipv4": set(), "sha1": set(),
+        "iocs": {"urls": set(), "ipv4": set(), "sha256": set(), "sha1": set(),
                  "dropped_paths": set(), "domains": set()},
     }
     iocs = result["iocs"]
@@ -550,8 +696,8 @@ def parse_edr_csv(text: str) -> Dict[str, Any]:
                     if decoded:
                         result["threat"]["decoded_cmdline"] = decoded
                         extract_iocs_from_text(decoded, iocs)
-                if key == "File content SHA1 hash" and val and val != "0"*40:
-                    iocs["sha1"].add(val.lower())
+                if key == "File content SHA1 hash" and val:
+                    _add_hash_ioc(val, iocs)
             i += 1
             continue
 
@@ -621,8 +767,7 @@ def parse_table_row(header, row, category, iocs) -> Optional[Dict[str, Any]]:
         if decoded:
             e["decoded_cmdline"] = decoded
             extract_iocs_from_text(decoded, iocs)
-        if e["sha1"] and e["sha1"] != "0"*40:
-            iocs["sha1"].add(e["sha1"].lower())
+        _add_hash_ioc(e["sha1"], iocs)
 
     elif category == "network":
         e.update({
@@ -645,8 +790,7 @@ def parse_table_row(header, row, category, iocs) -> Optional[Dict[str, Any]]:
             "file_type": col(header, row, "File Type"),
             "process_name": col(header, row, "Process Name"),
         })
-        if e["sha1"] and e["sha1"] != "0"*40:
-            iocs["sha1"].add(e["sha1"].lower())
+        _add_hash_ioc(e["sha1"], iocs)
 
     elif category == "indicator":
         e.update({
@@ -886,21 +1030,55 @@ class CreditCardRecognizer(PatternRecognizer):
 # 引擎組裝
 # ============================================================================
 
-def build_engines(redact_uuid: bool, custom_id_patterns: List[str] = None):
-    import spacy
+class _MinimalNlpEngine(NlpEngine):
+    """純 regex 模式的空 NLP engine，不依賴 spaCy 或任何 ML 模型。
+    本工具所有 entity 均為自訂 PatternRecognizer（regex），不需要 NLP 推論。"""
+    def load(self): pass
+    def is_loaded(self): return True
+    def process_text(self, text, language):
+        return NlpArtifacts(
+            entities=[], tokens=[], tokens_indices=[],
+            lemmas=[], nlp_engine=self, language=language,
+        )
+    def process_batch(self, texts, language, batch_size=1, n_process=1, **kw):
+        for t in texts:
+            yield t, self.process_text(t, language)
+    def is_stopword(self, word, language): return False
+    def is_punct(self, word, language): return False
+    def get_supported_entities(self): return []
+    def get_supported_languages(self): return ["en"]
 
-    class _BlankSpacyEngine(SpacyNlpEngine):
-        def __init__(self):
-            super().__init__(models=[{"lang_code": "en", "model_name": "en"}])
-            self.nlp = {"en": spacy.blank("en")}
+
+def build_engines(options: Dict[str, bool] = None, custom_id_patterns: List[str] = None,
+                  redact_uuid: bool = None):
+    """建立 Presidio analyzer / anonymizer 與啟用的 entity 清單。
+
+    options dict 支援的 key（預設全 False = 遮蔽；True = 保留明文，不掛入對應 recognizer）：
+      keep_datetime   — 保留日期時間（攻擊時間線分析）
+      keep_public_ip  — 保留公開 IP（C2 分析）；由 redact_ip_literals 處理，非 recognizer 控制
+      keep_domain     — 保留網域（IOC 分析）
+      keep_crypto     — 保留加密錢包地址（勒索 IOC）
+      keep_uuid       — 保留 UUID / Machine Code（行為路徑分析）
+      keep_mac        — 保留 MAC address（設備識別）
+
+    redact_uuid 為舊 CLI 參數，保留向後相容；若同時指定 options["keep_uuid"] 優先。
+    """
+    from presidio_analyzer.predefined_recognizers import (
+        CryptoRecognizer, IbanRecognizer, DateRecognizer, UsPassportRecognizer,
+    )
+
+    opts = options or {}
+
+    # 向後相容：舊 redact_uuid 參數轉換
+    if redact_uuid is not None and "keep_uuid" not in opts:
+        opts = dict(opts)
+        opts["keep_uuid"] = not redact_uuid
 
     registry = RecognizerRegistry()
 
-    # IP / CIDR 由 ipaddress 驗證型流程處理，避免版本號與時間格式誤判。
+    # ── 固定啟用（始終遮蔽）──
     registry.add_recognizer(PatternRecognizer(supported_entity="CJK",
                                               patterns=[CJK_PATTERN]))
-    registry.add_recognizer(PatternRecognizer(supported_entity="DOMAIN",
-                                              patterns=[DOMAIN_PATTERN]))
     registry.add_recognizer(PatternRecognizer(supported_entity="EMAIL",
                                               patterns=[EMAIL_PATTERN]))
     registry.add_recognizer(PatternRecognizer(
@@ -917,20 +1095,54 @@ def build_engines(redact_uuid: bool, custom_id_patterns: List[str] = None):
     registry.add_recognizer(PatternRecognizer(
         supported_entity="ORG", patterns=[ORG_PATTERN], context=ORG_CONTEXT,
         global_regex_flags=re.MULTILINE))
+    registry.add_recognizer(IbanRecognizer())
 
-    entities = ["CJK", "DOMAIN", "EMAIL", "OSUSER", "EMPID",
-                "TW_PHONE", "TW_ID", "CREDIT_CARD", "ORG"]
+    entities = ["CJK", "EMAIL", "OSUSER", "EMPID",
+                "TW_PHONE", "TW_ID", "CREDIT_CARD", "ORG", "IBAN_CODE", "US_PASSPORT"]
 
-    if redact_uuid:
+    # US_PASSPORT（固定遮蔽）
+    registry.add_recognizer(UsPassportRecognizer())
+
+    # ── 可選：keep_domain（預設遮蔽）──
+    if not opts.get("keep_domain", False):
+        registry.add_recognizer(PatternRecognizer(supported_entity="DOMAIN",
+                                                  patterns=[DOMAIN_PATTERN]))
+        entities.append("DOMAIN")
+
+    # ── 可選：keep_datetime（預設遮蔽）──
+    if not opts.get("keep_datetime", False):
+        registry.add_recognizer(DateRecognizer())
+        entities.append("DATE_TIME")
+
+    # ── 可選：keep_crypto（預設遮蔽）──
+    if not opts.get("keep_crypto", False):
+        # 放寬 score 門檻：SOC log 裡不一定有 wallet/btc 等 context 詞
+        crypto_recognizer = CryptoRecognizer()
+        # 重新建立 patterns 以降低分數門檻
+        crypto_recognizer.patterns = [
+            Pattern("crypto_address", p.regex, 0.3)
+            for p in crypto_recognizer.patterns
+        ]
+        registry.add_recognizer(crypto_recognizer)
+        entities.append("CRYPTO")
+
+    # ── 可選：keep_uuid（預設遮蔽）──
+    if not opts.get("keep_uuid", False):
         registry.add_recognizer(PatternRecognizer(supported_entity="UUID",
                                                   patterns=[UUID_PATTERN]))
         entities.append("UUID")
 
-    # User-supplied custom ID patterns (--custom-id-pattern)
+    # ── 可選：keep_mac（預設遮蔽）──
+    if not opts.get("keep_mac", False):
+        registry.add_recognizer(PatternRecognizer(supported_entity="MAC_ADDRESS",
+                                                  patterns=[MAC_PATTERN]))
+        entities.append("MAC_ADDRESS")
+
+    # ── 使用者自訂 ID pattern（--custom-id-pattern）──
     for i, pat_str in enumerate(custom_id_patterns or [], start=1):
         entity = f"CUSTOM_ID_{i}"
         try:
-            re.compile(pat_str)  # validate before registering
+            re.compile(pat_str)
         except re.error as exc:
             print(f"[警告] 忽略無效的 --custom-id-pattern #{i} ({pat_str!r}): {exc}")
             continue
@@ -940,7 +1152,7 @@ def build_engines(redact_uuid: bool, custom_id_patterns: List[str] = None):
         ))
         entities.append(entity)
 
-    analyzer = AnalyzerEngine(registry=registry, nlp_engine=_BlankSpacyEngine(),
+    analyzer = AnalyzerEngine(registry=registry, nlp_engine=_MinimalNlpEngine(),
                               supported_languages=["en"])
     anonymizer = AnonymizerEngine()
     anonymizer.add_anonymizer(ConsistentPseudonymizer)
@@ -961,16 +1173,20 @@ def build_operator_configs(entity_mapping: Dict[str, Dict[str, str]],
 
 
 def deidentify_text(text, analyzer, anonymizer, entity_mapping, entities,
-                    operators, keep_public_ip, keywords, secret_hit_flag):
+                    operators, keep_public_ip, keywords, block_patterns,
+                    secret_hit_flag):
     if not text:
         return text
 
-    if keywords:
-        text = redact_keywords(text, keywords, entity_mapping)
+    if keywords or block_patterns:
+        text = redact_keywords(text, keywords or [], entity_mapping,
+                               block_patterns=block_patterns or [])
+    text = redact_cmdline_secrets(text, entity_mapping, secret_hit_flag)
     text = redact_inline_secrets(text, entity_mapping, secret_hit_flag)
     text = redact_ip_literals(text, entity_mapping, keep_public_ip)
 
-    results = analyzer.analyze(text=text, language="en", entities=entities)
+    results = analyzer.analyze(text=text, language="en", entities=entities,
+                               score_threshold=0.0)
 
     if results:
         text = anonymizer.anonymize(text=text, analyzer_results=results,
@@ -1072,19 +1288,21 @@ def is_edr_csv(text: str) -> bool:
 def process_file(path: Path, analyzer, anonymizer, entity_mapping, entities,
                  operators, keep_public_ip, keywords, output_dir: Path,
                  max_mb: float = 10.0, do_dedup: bool = True,
-                 mapping_dir: Optional[Path] = None):
+                 mapping_dir: Optional[Path] = None,
+                 block_patterns: List[str] = None):
+    block_patterns = block_patterns or []
     text, enc = read_text_any_encoding(path)
 
     # CSV auto-detection: structured EDR export → dedicated pipeline
     if path.suffix.lower() == ".csv" and is_edr_csv(text):
         if mapping_dir is None:
             mapping_dir = output_dir.parent / "deidentify_mapping"
-        ctx = (analyzer, anonymizer, entity_mapping, entities, operators, keep_public_ip, keywords)
+        ctx = (analyzer, anonymizer, entity_mapping, entities, operators, keep_public_ip, keywords, block_patterns)
         return None, enc, "edr", [], process_edr_file(
             path, ctx, output_dir, mapping_dir, max_mb, do_dedup
         )
 
-    ctx = (analyzer, anonymizer, entity_mapping, entities, operators, keep_public_ip, keywords)
+    ctx = (analyzer, anonymizer, entity_mapping, entities, operators, keep_public_ip, keywords, block_patterns)
     handler = FORMAT_DISPATCH.get(path.suffix.lower(), process_plain)
     obj, secret_lines = handler(text, *ctx)
     obj["source_file"] = path.name
@@ -1194,6 +1412,7 @@ def parse_cli_args(raw_args: List[str]) -> Tuple[List[str], Dict[str, Any]]:
         "no_dedup": False,
         "keywords": [],
         "custom_id_patterns": [],
+        "rules_file": None,
     }
     args = []
     i = 0
@@ -1242,6 +1461,13 @@ def parse_cli_args(raw_args: List[str]) -> Tuple[List[str], Dict[str, Any]]:
             options["output_dir"] = arg.split("=", 1)[1]
         elif arg.startswith("--mapping-dir="):
             options["mapping_dir"] = arg.split("=", 1)[1]
+        elif arg == "--rules":
+            if i + 1 >= len(raw_args):
+                raise ValueError("--rules 需要指定 YAML 規則檔路徑")
+            options["rules_file"] = raw_args[i + 1]
+            i += 1
+        elif arg.startswith("--rules="):
+            options["rules_file"] = arg.split("=", 1)[1]
         elif arg.startswith("--"):
             raise ValueError(f"未知旗標：{arg}")
         else:
@@ -1278,8 +1504,21 @@ def main():
 
     keep_public_ip = options["keep_public_ip"]
     redact_uuid = options["redact_uuid"]
-    keywords = options["keywords"]
+    keywords = list(options["keywords"])
     custom_id_patterns = options["custom_id_patterns"]
+    block_patterns: List[str] = []
+
+    if options["rules_file"]:
+        try:
+            rules = load_rules(options["rules_file"])
+            keywords.extend(rules["block"])
+            block_patterns.extend(rules["block_patterns"])
+            print(f"  [規則檔] 已載入 {options['rules_file']}："
+                  f" {len(rules['block'])} 個關鍵字，{len(rules['block_patterns'])} 個 regex 規則")
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"錯誤：規則檔載入失敗 — {exc}")
+            sys.exit(1)
+
     first = Path(args[0])
     base_dir = first.parent if first.parent != Path("") else Path.cwd()
     output_dir = resolve_output_path(base_dir, options["output_dir"])
@@ -1289,7 +1528,10 @@ def main():
     print(" Log De-identification Tool v3")
     print("=" * 60)
 
-    analyzer, anonymizer, entities = build_engines(redact_uuid, custom_id_patterns)
+    analyzer, anonymizer, entities = build_engines(
+        options={"keep_uuid": not redact_uuid},
+        custom_id_patterns=custom_id_patterns,
+    )
     entity_mapping: Dict[str, Dict[str, str]] = {}
     operators = build_operator_configs(entity_mapping, entities)
     all_secret_lines = {}
@@ -1305,7 +1547,8 @@ def main():
 
         out_path, enc, fmt, secrets, edr_info = process_file(
             p, analyzer, anonymizer, entity_mapping, entities, operators,
-            keep_public_ip, keywords, output_dir, max_mb, do_dedup, mapping_dir
+            keep_public_ip, keywords, output_dir, max_mb, do_dedup, mapping_dir,
+            block_patterns
         )
 
         if edr_info:

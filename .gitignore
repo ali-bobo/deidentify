@@ -1,33 +1,33 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.egg-info/
+.eggs/
+*.egg
+
+# ── 打包產物（不上傳；用 PyInstaller 在本地重建）────────────────────────────
 dist/
 build/
-.eggs/
+*.spec.bak
 
-# Virtual environments
-.venv/
-venv/
-env/
-
-# ── Tool output — NEVER commit these ──────────────────────────────────────────
-# Go-identified output and reversal mapping MUST stay local.
+# ── 工具輸出（絕對不能進版本控制）──────────────────────────────────────────
 deidentified_output/
 deidentify_mapping/
 
-# ── Sensitive input data — keep ALL private logs out of git ───────────────────
-# Add explicit example_ exceptions to allow sanitised demo files.
+# ── 使用者自訂黑名單（本地敏感設定，請勿公開）──────────────────────────────
+# 倉庫提供 rules.yaml.example 作為範本
+rules.yaml
+
+# ── 原始日誌 / 輸入資料 ─────────────────────────────────────────────────────
 *.log
-*.txt
-*.csv
-*.json
-*.xml
 *.evtx
 *.pcap
 *.pcapng
+*.csv
+*.json
+*.xml
 *.xlsx
 *.xls
 *.docx
@@ -37,13 +37,12 @@ deidentify_mapping/
 !example_*.txt
 !example_*.csv
 
-# Common secrets / credential files
+# ── 憑證 / 金鑰 / 環境變數 ──────────────────────────────────────────────────
 .env
 .env.*
 *.env
 secrets.yaml
 secrets.yml
-*_secrets.*
 credentials.json
 service_account.json
 *.pem
@@ -52,12 +51,24 @@ service_account.json
 *.pfx
 *.jks
 
-# OS
+# ── 虛擬環境 ────────────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.conda/
+
+# ── 測試快取 ─────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── 內部設計文件 ─────────────────────────────────────────────────────────────
+docs/
+
+# ── OS / 編輯器 ──────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# Editor
 .vscode/
 .idea/
 *.swp

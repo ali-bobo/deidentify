@@ -1,0 +1,18 @@
+# rules.yaml — 自訂黑名單範本
+#
+# 使用方式：
+#   複製此檔案並命名為 rules.yaml，放在與 EXE 相同目錄下。
+#   GUI 啟動時會自動載入；也可在「⚙ 黑名單」視窗即時編輯。
+#
+# rules.yaml 含有真實關鍵字，請勿上傳至 Git 或共用環境。
+
+# block: 直接字串比對（不分大小寫）
+block:
+  - ProjectX          # 替換成你的專案代號
+  - ServerGroup-A     # 替換成你的機台群組名稱
+
+# block_patterns: 正規表達式（regex）比對
+block_patterns:
+  - PROJ-\d+          # 例如 PROJ-1234
+  - SRV\d{3}          # 例如 SRV042
+  - CASE-\d{6}        # 例如 CASE-202501
