@@ -15,6 +15,8 @@ pip install -r requirements.txt
 pip install pyinstaller
 ```
 
+> `requirements.txt` 已包含 `customtkinter` 與 `tkinterdnd2`，無需額外安裝。
+
 接著在專案根目錄執行：
 
 ```bash
