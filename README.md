@@ -8,18 +8,30 @@
 
 ## 打包為 EXE（開發者）
 
-需先安裝依賴與 PyInstaller：
+**步驟一：安裝依賴**
 
-```bash
-pip install -r requirements.txt
-pip install pyinstaller
+PowerShell 無法直接執行裸 `pip`，請用以下格式：
+
+```
+python -m pip install -r requirements.txt
+python -m pip install pyinstaller
 ```
 
 > `requirements.txt` 已包含 `customtkinter` 與 `tkinterdnd2`，無需額外安裝。
 
-接著在專案根目錄執行：
+**步驟二：準備 rules.yaml**
 
-```bash
+`rules.yaml` 為本地設定檔，不在版本控制中，打包前需先建立：
+
+```
+copy rules.yaml.example rules.yaml
+```
+
+**步驟三：打包**
+
+在專案根目錄執行：
+
+```
 python -m PyInstaller deidentify-tool.spec --noconfirm
 ```
 
